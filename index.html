@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#4f46e5">
 <title>豪锦管理平台</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 :root{
@@ -290,6 +291,29 @@ select{appearance:none;background-image:url("data:image/svg+xml;charset=utf8,%3C
 </style>
 </head>
 <body>
+  <div id="loginOverlay" style="position:fixed;inset:0;background:linear-gradient(135deg,#0b1120,#1e1b4b);z-index:9999;display:none;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:20px;padding:36px 32px;width:100%;max-width:400px;box-shadow:0 24px 48px -12px rgba(0,0,0,.4)">
+    <div style="text-align:center;margin-bottom:24px">
+      <div style="width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff;font-size:22px;font-weight:700;display:grid;place-items:center;margin:0 auto 14px;box-shadow:0 12px 24px -6px rgba(99,102,241,.7)">锦</div>
+      <h1 style="margin:0;font-size:20px;font-weight:700;color:#0f172a">豪锦管理平台</h1>
+      <p style="margin:6px 0 0;font-size:13px;color:#64748b">登录后手机和电脑数据自动同步</p>
+    </div>
+    <div id="loginForm">
+      <div style="margin-bottom:14px">
+        <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;font-weight:500">邮箱</label>
+        <input type="email" id="loginEmail" placeholder="your@email.com" autocomplete="email" style="width:100%;padding:11px 13px;border:1px solid #e5e7ef;border-radius:10px;font-size:14px;outline:0;box-sizing:border-box">
+      </div>
+      <div style="margin-bottom:20px">
+        <label style="display:block;font-size:12px;color:#64748b;margin-bottom:6px;font-weight:500">密码</label>
+        <input type="password" id="loginPassword" placeholder="至少 6 位" autocomplete="current-password" style="width:100%;padding:11px 13px;border:1px solid #e5e7ef;border-radius:10px;font-size:14px;outline:0;box-sizing:border-box">
+      </div>
+      <button id="loginBtn" style="width:100%;padding:12px;border-radius:10px;background:linear-gradient(135deg,#6366f1,#4338ca);color:#fff;font-size:14.5px;font-weight:600;border:0;cursor:pointer">登录</button>
+      <button id="registerBtn" style="width:100%;padding:10px;border-radius:10px;background:#fff;color:#4338ca;font-size:13.5px;font-weight:500;border:1px solid #e0e7ff;margin-top:10px;cursor:pointer">还没有账号？注册一个</button>
+      <div id="loginMsg" style="margin-top:14px;font-size:12.5px;color:#dc2626;text-align:center;min-height:18px;line-height:1.5"></div>
+    </div>
+    <div id="loginLoading" style="display:none;text-align:center;padding:20px 0;color:#64748b;font-size:13px">登录中…</div>
+  </div>
+</div>
 <div class="app">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
@@ -322,6 +346,12 @@ select{appearance:none;background-image:url("data:image/svg+xml;charset=utf8,%3C
 'use strict';
 const KEY = 'audio_crm_v3';
 const DB_VERSION = 6;
+  
+/* ============ Supabase 云同步 ============ */
+const SUPABASE_URL = 'https://qtgygdevuphqgwbfwuwk.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF0Z3lnZGV2dXBocWd3YmZ3dXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk0OTk2NjQsImV4cCI6MjEwNTA3NTY2NH0.vV5Gml_RwCpsFMIHuMc07gcF5wQiN7vi81EuHoCP7-M';
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let CURRENT_USER = null;
 const CUSTOMER_TYPES = ['经销商','工程商','系统集成商','KTV/酒吧','酒店/餐饮','会议/报告厅','影院/剧场','学校/政府','演出租赁','电商/零售','终端个人','其他'];
 const CUSTOMER_LEVELS = ['A','B','C','D'];
 const CUSTOMER_STATUS = ['潜在','跟进中','意向','合作中','暂停','流失'];
@@ -434,22 +464,158 @@ function emptyDB(){
   };
 }
 let DB = emptyDB();
-function loadDB(){
-  try{
-    const raw = localStorage.getItem(KEY);
-    if(!raw) return emptyDB();
-    const parsed = JSON.parse(raw);
-    const db = Object.assign(emptyDB(), parsed);
-    ['customers','followUps','projects','orders','tasks','products'].forEach(k => { if(!Array.isArray(db[k])) db[k] = []; });
-    if(!db.settings || typeof db.settings !== 'object') db.settings = emptyDB().settings;
-    if(db.settings.commissionRate == null) db.settings.commissionRate = 2;
-    db.version = DB_VERSION;
+let __saveTimer = null;
+async function loadDB(){
+  if(!CURRENT_USER) return emptyDB();
+  try {
+    const uid = CURRENT_USER.id;
+    const [cust, fu, proj, ord, tsk, prod, st] = await Promise.all([
+      sb.from('customers').select('*').eq('user_id', uid),
+      sb.from('follow_ups').select('*').eq('user_id', uid),
+      sb.from('projects').select('*').eq('user_id', uid),
+      sb.from('orders').select('*').eq('user_id', uid),
+      sb.from('tasks').select('*').eq('user_id', uid),
+      sb.from('products').select('*').eq('user_id', uid),
+      sb.from('user_settings').select('*').eq('user_id', uid).maybeSingle()
+    ]);
+    const db = emptyDB();
+    db.customers = (cust.data || []).map(r => ({
+      id: r.id, name: r.name, type: r.type, level: r.level, status: r.status,
+      contact: r.contact, phone: r.phone, wechat: r.wechat, email: r.email,
+      region: r.region, address: r.address, source: r.source, biz: r.biz,
+      annual: num(r.annual), credit: num(r.credit), followUpDays: num(r.follow_up_days),
+      tags: r.tags || [], note: r.note,
+      lastFollowAt: r.last_follow_at, nextFollowAt: r.next_follow_at,
+      createdAt: r.created_at, updatedAt: r.updated_at
+    }));
+    db.followUps = (fu.data || []).map(r => ({
+      id: r.id, customerId: r.customer_id, type: r.type, date: r.date,
+      content: r.content, result: r.result, nextPlan: r.next_plan, nextDate: r.next_date,
+      createdAt: r.created_at
+    }));
+    db.projects = (proj.data || []).map(r => ({
+      id: r.id, name: r.name, customerId: r.customer_id, type: r.type,
+      budget: num(r.budget), closeDate: r.close_date, stage: r.stage,
+      size: r.size, rival: r.rival, next: r.next, note: r.note,
+      createdAt: r.created_at, updatedAt: r.updated_at
+    }));
+    db.orders = (ord.data || []).map(r => ({
+      id: r.id, no: r.no, customerId: r.customer_id, projectId: r.project_id,
+      date: r.date, status: r.status, shipDate: r.ship_date, payDate: r.pay_date,
+      payMethod: r.pay_method, discount: num(r.discount), paidAmount: num(r.paid_amount),
+      items: r.items || [], note: r.note,
+      createdAt: r.created_at, updatedAt: r.updated_at
+    }));
+    db.tasks = (tsk.data || []).map(r => ({
+      id: r.id, title: r.title, customerId: r.customer_id, type: r.type,
+      due: r.due, priority: r.priority, note: r.note, done: r.done, doneAt: r.done_at,
+      createdAt: r.created_at
+    }));
+    db.products = (prod.data || []).map(r => ({
+      id: r.id, name: r.name, brand: r.brand, model: r.model, cat: r.cat,
+      unit: r.unit, cost: num(r.cost), price: num(r.price), stock: num(r.stock),
+      status: r.status, note: r.note, createdAt: r.created_at
+    }));
+    if(st.data) {
+      db.settings = {
+        name: st.data.name || '', region: st.data.region || '',
+        company: st.data.company || '', target: num(st.data.target),
+        commissionRate: num(st.data.commission_rate)
+      };
+    }
     return db;
-  }catch(e){ console.error('[CRM] 数据读取失败', e); return emptyDB(); }
+  } catch(e) {
+    console.error('loadDB error', e);
+    toast('云端数据加载失败：' + e.message, 'err', 5000);
+    return emptyDB();
+  }
 }
 function saveDB(){
-  try{ localStorage.setItem(KEY, JSON.stringify(DB)); return true; }
-  catch(e){ toast('保存失败：浏览器存储空间不足', 'err'); return false; }
+  if(__saveTimer) clearTimeout(__saveTimer);
+  __saveTimer = setTimeout(() => syncToCloud().catch(e => console.error('sync error', e)), 300);
+  return true;
+}
+async function syncToCloud(){
+  if(!CURRENT_USER) return;
+  const uid = CURRENT_USER.id;
+  const now = new Date().toISOString();
+  const customers = DB.customers.map(c => ({
+    id: c.id, user_id: uid, name: c.name || '', type: c.type || '',
+    level: c.level || 'B', status: c.status || '潜在',
+    contact: c.contact || '', phone: c.phone || '', wechat: c.wechat || '',
+    email: c.email || '', region: c.region || '', address: c.address || '',
+    source: c.source || '', biz: c.biz || '',
+    annual: num(c.annual), credit: num(c.credit),
+    follow_up_days: num(c.followUpDays), tags: c.tags || [], note: c.note || '',
+    last_follow_at: c.lastFollowAt || null, next_follow_at: c.nextFollowAt || null,
+    created_at: c.createdAt || now, updated_at: c.updatedAt || now
+  }));
+  const followUps = DB.followUps.map(f => ({
+    id: f.id, user_id: uid, customer_id: f.customerId,
+    type: f.type || '电话', date: f.date || now,
+    content: f.content || '', result: f.result || '',
+    next_plan: f.nextPlan || '', next_date: f.nextDate || null,
+    created_at: f.createdAt || now
+  }));
+  const projects = DB.projects.map(p => ({
+    id: p.id, user_id: uid, name: p.name || '',
+    customer_id: p.customerId || null, type: p.type || '',
+    budget: num(p.budget), close_date: p.closeDate || null,
+    stage: p.stage || '', size: p.size || '', rival: p.rival || '',
+    next: p.next || '', note: p.note || '',
+    created_at: p.createdAt || now, updated_at: p.updatedAt || now
+  }));
+  const orders = DB.orders.map(o => ({
+    id: o.id, user_id: uid, no: o.no || '',
+    customer_id: o.customerId || '', project_id: o.projectId || null,
+    date: o.date || null, status: o.status || '',
+    ship_date: o.shipDate || null, pay_date: o.payDate || null,
+    pay_method: o.payMethod || '', discount: num(o.discount),
+    paid_amount: num(o.paidAmount), items: o.items || [], note: o.note || '',
+    created_at: o.createdAt || now, updated_at: o.updatedAt || now
+  }));
+  const tasks = DB.tasks.map(t => ({
+    id: t.id, user_id: uid, title: t.title || '',
+    customer_id: t.customerId || null, type: t.type || '',
+    due: t.due || null, priority: t.priority || '',
+    note: t.note || '', done: !!t.done, done_at: t.doneAt || null,
+    created_at: t.createdAt || now
+  }));
+  const products = DB.products.map(p => ({
+    id: p.id, user_id: uid, name: p.name || '',
+    brand: p.brand || '', model: p.model || '', cat: p.cat || '',
+    unit: p.unit || '', cost: num(p.cost), price: num(p.price),
+    stock: num(p.stock), status: p.status || '', note: p.note || '',
+    created_at: p.createdAt || now
+  }));
+  const ops = [];
+  if(customers.length) ops.push(sb.from('customers').upsert(customers));
+  if(followUps.length) ops.push(sb.from('follow_ups').upsert(followUps));
+  if(projects.length) ops.push(sb.from('projects').upsert(projects));
+  if(orders.length) ops.push(sb.from('orders').upsert(orders));
+  if(tasks.length) ops.push(sb.from('tasks').upsert(tasks));
+  if(products.length) ops.push(sb.from('products').upsert(products));
+  ops.push(sb.from('user_settings').upsert({
+    user_id: uid, name: DB.settings.name || '', region: DB.settings.region || '',
+    company: DB.settings.company || '', target: num(DB.settings.target),
+    commission_rate: num(DB.settings.commissionRate), updated_at: now
+  }));
+  await Promise.all(ops);
+  const del = async (table, ids) => {
+    if(ids.length === 0){ await sb.from(table).delete().eq('user_id', uid); return; }
+    const { data } = await sb.from(table).select('id').eq('user_id', uid);
+    const cloudIds = (data || []).map(r => r.id);
+    const toDelete = cloudIds.filter(id => !ids.includes(id));
+    if(toDelete.length) await sb.from(table).delete().in('id', toDelete);
+  };
+  await Promise.all([
+    del('customers', DB.customers.map(c => c.id)),
+    del('follow_ups', DB.followUps.map(f => f.id)),
+    del('projects', DB.projects.map(p => p.id)),
+    del('orders', DB.orders.map(o => o.id)),
+    del('tasks', DB.tasks.map(t => t.id)),
+    del('products', DB.products.map(p => p.id))
+  ]);
 }
 const findCustomer = id => DB.customers.find(c => c.id === id);
 const findProject  = id => DB.projects.find(p => p.id === id);
@@ -580,7 +746,16 @@ function renderNav(){
       <span>${n.label}</span>
     </button>`).join('');
   const s = DB.settings;
-  $('#sfoot').textContent = s.name ? `${s.name}${s.region ? ' · ' + s.region : ''}` : '数据存储于本机浏览器';
+  $('#sfoot').innerHTML = `
+    <div style="font-size:11px;color:#64748b;line-height:1.6">${s.name ? esc(s.name) + (s.region ? ' · ' + esc(s.region) : '') : '数据已同步到云端'}</div>
+    <button id="logoutBtn" style="margin-top:6px;font-size:11px;color:#64748b;text-decoration:underline;padding:2px 0;background:none;border:0;cursor:pointer">退出登录</button>
+  `;
+  const lb = $('#logoutBtn');
+  if(lb) lb.onclick = async () => {
+    if(!confirm('确定退出登录？')) return;
+    await sb.auth.signOut();
+    location.reload();
+  };
 }
 function render(){
   const page = UI.page;
